@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace FiberInterop\Amp;
 
+use Revolt\EventLoop;
 use Revolt\EventLoop\CallbackType;
 use Revolt\EventLoop\Driver;
 use Revolt\EventLoop\Suspension;
@@ -44,6 +45,15 @@ final class ActivatingDriver implements Driver, ScopeActivatingDriver
         return false;
     }
 
+    /** Install the decorator unless one is installed or the loop is running. Idempotent. */
+    public static function install(): void
+    {
+        $driver = EventLoop::getDriver();
+        if (!self::isInstalled($driver) && !$driver->isRunning()) {
+            EventLoop::setDriver(new self($driver));
+        }
+    }
+
     /** Unwrap decorators down to Revolt's own driver. */
     public static function unwrap(Driver $driver): Driver
     {
@@ -60,10 +70,9 @@ final class ActivatingDriver implements Driver, ScopeActivatingDriver
 
     private static function wrap(\Closure $closure): \Closure
     {
-        return static function (mixed ...$args) use ($closure) {
-            self::activate();
-            return $closure(...$args);
-        };
+        // A callback runs in the Scope that was current when it was registered (Scope::run() activates it).
+        $scope = \Scope::getCurrent();
+        return static fn(mixed ...$args) => $scope->run($closure, ...$args);
     }
 
     public function run(): void

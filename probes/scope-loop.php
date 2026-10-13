@@ -8,10 +8,9 @@ $root = $_GET;
 $bad = new ArrayObject(); // an object: arrow fns capture by value
 async\run(function () use ($bad) {
     $task = function (string $name, float $delay) use ($bad) {
-        // Amp\async() knows nothing about scopes, so the task enters its own scope; the adapter's driver
-        // hooks must then keep it active across Amp\delay().
-        $scope = new Scope();
-        return async(fn() => $scope->run(function () use ($name, $delay, $bad) {
+        // The scope is entered around Amp\async(); the driver runs the task's start callback in it and keeps
+        // it active across Amp\delay().
+        return (new Scope())->run(fn() => async(function () use ($name, $delay, $bad) {
             $_GET = ['req' => $name];
             for ($i = 0; $i < 2; $i++) {
                 delay($delay);

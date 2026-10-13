@@ -28,10 +28,7 @@ final class Adapter implements \async\Adapter
     {
         // Per-scope superglobals: make Revolt activate the current \Scope whenever it hands control to user code.
         // Idempotent; skipped if a decorator is installed already (also another adapter's) or the loop is running.
-        $driver = EventLoop::getDriver();
-        if (!ActivatingDriver::isInstalled($driver) && !$driver->isRunning()) {
-            EventLoop::setDriver(new ActivatingDriver($driver));
-        }
+        ActivatingDriver::install();
     }
 
     public function go(\Closure $f): object
