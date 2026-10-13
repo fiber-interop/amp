@@ -25,5 +25,10 @@
         "psr-4": {
             "FiberInterop\\Amp\\Tests\\": "tests/"
         }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "0.2.x-dev"
+        }
     }
 }
