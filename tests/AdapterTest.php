@@ -21,108 +21,130 @@ final class AdapterTest extends TestCase
 {
     public function testGoReturnsRealFuture(): void
     {
-        $task = go(fn() => 7);
-        $this->assertInstanceOf(Future::class, $task);
-        $this->assertSame(7, await($task));
+        run(function () {
+            $task = go(fn() => 7);
+            $this->assertInstanceOf(Future::class, $task);
+            $this->assertSame(7, await($task));
+        });
     }
 
     public function testApiTaskAwaitedWithAmpsOwnAwait(): void
     {
-        $task = go(function () { sleep(0.01); return 'x'; });
-        $this->assertSame('x', $task->await());
-        $this->assertSame([1, 2], Future\await([go(fn() => 1), go(fn() => 2)]));
+        run(function () {
+            $task = go(function () { sleep(0.01); return 'x'; });
+            $this->assertSame('x', $task->await());
+            $this->assertSame([1, 2], Future\await([go(fn() => 1), go(fn() => 2)]));
+        });
     }
 
     public function testAmpFutureValueAndError(): void
     {
-        $this->assertSame(1, await(Future::complete(1)));
-        $this->expectExceptionMessage('boom');
-        await(Future::error(new \RuntimeException('boom')));
+        run(function () {
+            $this->assertSame(1, await(Future::complete(1)));
+            $this->expectExceptionMessage('boom');
+            await(Future::error(new \RuntimeException('boom')));
+        });
     }
 
     public function testExceptionRethrownUnchanged(): void
     {
-        $e = new \DomainException('same');
-        try {
-            await(Future::error($e));
-            $this->fail();
-        } catch (\Throwable $caught) {
-            $this->assertSame($e, $caught);
-        }
+        run(function () {
+            $e = new \DomainException('same');
+            try {
+                await(Future::error($e));
+                $this->fail();
+            } catch (\Throwable $caught) {
+                $this->assertSame($e, $caught);
+            }
+        });
     }
 
     public function testTimeoutTranslatedAndTaskKeepsRunning(): void
     {
-        $ran = false;
-        $future = \Amp\async(function () use (&$ran) { \Amp\delay(0.1); $ran = true; return 1; });
-        $start = microtime(true);
-        try {
-            await($future, 0.02);
-            $this->fail('expected timeout');
-        } catch (TimeoutException $e) {
-            $this->assertInstanceOf(Timeout::class, $e);
-            $this->assertInstanceOf(AmpCancelled::class, $e->getPrevious());
-            $this->assertLessThan(0.08, microtime(true) - $start);
-        }
-        $this->assertFalse($ran);
-        $this->assertSame(1, $future->await());
-        $this->assertTrue($ran);
+        run(function () {
+            $ran = false;
+            $future = \Amp\async(function () use (&$ran) { \Amp\delay(0.1); $ran = true; return 1; });
+            $start = microtime(true);
+            try {
+                await($future, 0.02);
+                $this->fail('expected timeout');
+            } catch (TimeoutException $e) {
+                $this->assertInstanceOf(Timeout::class, $e);
+                $this->assertInstanceOf(AmpCancelled::class, $e->getPrevious());
+                $this->assertLessThan(0.08, microtime(true) - $start);
+            }
+            $this->assertFalse($ran);
+            $this->assertSame(1, $future->await());
+            $this->assertTrue($ran);
+        });
     }
 
     public function testOtherCancellationTranslated(): void
     {
-        $source = new DeferredCancellation();
-        $future = \Amp\async(function () use ($source) {
-            \Amp\delay(1, true, $source->getCancellation());
+        run(function () {
+            $source = new DeferredCancellation();
+            $future = \Amp\async(function () use ($source) {
+                \Amp\delay(1, true, $source->getCancellation());
+            });
+            \Revolt\EventLoop::delay(0.01, fn() => $source->cancel());
+            try {
+                await($future);
+                $this->fail();
+            } catch (CancelledException $e) {
+                $this->assertNotInstanceOf(TimeoutException::class, $e);
+                $this->assertInstanceOf(AmpCancelled::class, $e->getPrevious());
+            }
         });
-        \Revolt\EventLoop::delay(0.01, fn() => $source->cancel());
-        try {
-            await($future);
-            $this->fail();
-        } catch (CancelledException $e) {
-            $this->assertNotInstanceOf(TimeoutException::class, $e);
-            $this->assertInstanceOf(AmpCancelled::class, $e->getPrevious());
-        }
     }
 
     public function testFutureOwnTimeoutIsNotOurTimeout(): void
     {
-        $future = \Amp\async(fn() => \Amp\delay(1, true, new TimeoutCancellation(0.01)));
-        $this->expectException(CancelledException::class);
-        await($future, 1.0);
+        run(function () {
+            $future = \Amp\async(fn() => \Amp\delay(1, true, new TimeoutCancellation(0.01)));
+            $this->expectException(CancelledException::class);
+            await($future, 1.0);
+        });
     }
 
     public function testAwaitInsideAmpAsync(): void
     {
-        $f = \Amp\async(function () {
-            $inner = go(function () { sleep(0.01); return 5; });
-            return await($inner) + 1;
+        run(function () {
+            $f = \Amp\async(function () {
+                $inner = go(function () { sleep(0.01); return 5; });
+                return await($inner) + 1;
+            });
+            $this->assertSame(6, $f->await());
         });
-        $this->assertSame(6, $f->await());
     }
 
     public function testSleepIsAmpDelay(): void
     {
-        $start = microtime(true);
-        await_all([go(fn() => sleep(0.05)), go(fn() => sleep(0.05))]);
-        $this->assertLessThan(0.09, microtime(true) - $start);
+        run(function () {
+            $start = microtime(true);
+            await_all([go(fn() => sleep(0.05)), go(fn() => sleep(0.05))]);
+            $this->assertLessThan(0.09, microtime(true) - $start);
+        });
     }
 
     public function testThenableAndRejection(): void
     {
-        $ok = new class { public function then($f, $r) { $f(3); } };
-        $bad = new class { public function then($f, $r) { $r('nope'); } };
-        $this->assertSame(3, await($ok));
-        $this->expectException(RejectedException::class);
-        await($bad);
+        run(function () {
+            $ok = new class { public function then($f, $r) { $f(3); } };
+            $bad = new class { public function then($f, $r) { $r('nope'); } };
+            $this->assertSame(3, await($ok));
+            $this->expectException(RejectedException::class);
+            await($bad);
+        });
     }
 
     public function testInPlaceInForeignFiber(): void
     {
-        $fiber = new \Fiber(fn() => await(\Amp\async(function () { \Amp\delay(0.01); return 9; })));
-        $fiber->start();
-        $this->assertTrue($fiber->isTerminated());
-        $this->assertSame(9, $fiber->getReturn());
+        run(function () {
+            $fiber = new \Fiber(fn() => await(go(function () { sleep(0.01); return 9; })));
+            $fiber->start();
+            $this->assertTrue($fiber->isTerminated());
+            $this->assertSame(9, $fiber->getReturn());
+        });
     }
 
     public function testCanAwait(): void

@@ -11,6 +11,8 @@ use Amp\TimeoutException as AmpTimeout;
 use async\RejectedException;
 use async\Timeout;
 use Revolt\EventLoop;
+use Revolt\EventLoop\Driver;
+use Revolt\EventLoop\DriverFactory;
 use Revolt\EventLoop\Internal\DriverSuspension;
 
 /**
@@ -18,7 +20,7 @@ use Revolt\EventLoop\Internal\DriverSuspension;
  *
  * go() returns the real Amp\Future, so the result of go() can be handed to any Amp API.
  * Waiting strategy (README, "In-place rule"):
- *  - {main}, a fiber created by Amp\async(), or a fiber running inside a Revolt callback: Amp / Revolt suspension.
+ *  - {main} (only the outermost run()'s wait), a fiber created by Amp\async(), or a fiber running inside a Revolt callback: Amp / Revolt suspension.
  *  - any other fiber (one nobody's loop owns): the loop is driven in place, from inside that fiber.
  */
 final class Adapter implements \async\Adapter
@@ -26,7 +28,14 @@ final class Adapter implements \async\Adapter
     public function go(\Closure $f): object
     {
         // The api has already wrapped $f so it runs in the scope captured at go().
-        return \Amp\async($f);
+        return $this->onDriver(static fn() => \Amp\async($f));
+    }
+
+    public function service(\Closure $f): object
+    {
+        // A plain Amp\async() task. The api's run() waits only for its own (non-service) tasks, so a sleeping service
+        // does not hold run() open and no unreference() of its watchers is needed (example 20).
+        return $this->onDriver(static fn() => \Amp\async($f));
     }
 
     public function canAwait(object $o): bool
@@ -35,6 +44,11 @@ final class Adapter implements \async\Adapter
     }
 
     public function await(object $o, float $timeout): mixed
+    {
+        return $this->onDriver(fn() => $this->doAwait($o, $timeout));
+    }
+
+    private function doAwait(object $o, float $timeout): mixed
     {
         if ($o instanceof Future) {
             return $this->canSuspend() ? $this->awaitFuture($o, $timeout) : $this->wait(
@@ -73,6 +87,11 @@ final class Adapter implements \async\Adapter
 
     public function sleep(float $seconds): void
     {
+        $this->onDriver(fn() => $this->doSleep($seconds));
+    }
+
+    private function doSleep(float $seconds): void
+    {
         if ($this->canSuspend()) {
             \Amp\delay(\max(0.0, $seconds));
             return;
@@ -95,10 +114,49 @@ final class Adapter implements \async\Adapter
 
     private function waitStream(string $method, mixed $resource, float $timeout): void
     {
+        $this->onDriver(fn() => $this->doWaitStream($method, $resource, $timeout));
+    }
+
+    private function doWaitStream(string $method, mixed $resource, float $timeout): void
+    {
         $this->wait(static function (\Closure $settle) use ($method, $resource) {
             $id = EventLoop::$method($resource, static fn() => $settle(true, null));
             return static fn() => EventLoop::cancel($id);
         }, $timeout);
+    }
+
+    /** @var \WeakMap<Driver, Driver> running driver => the private driver used for in-place waiting inside it */
+    private ?\WeakMap $nested = null;
+
+    /**
+     * Run $f against the driver that fits the calling context.
+     *
+     * A foreign fiber (one nobody's loop owns) that is started from inside a running Revolt loop cannot drive that
+     * loop in place: the loop's own fiber is on the call stack and is not suspended, so resuming it throws
+     * FiberError ("Cannot resume a fiber that is not suspended"). Such a fiber gets a private nested driver instead,
+     * swapped in as EventLoop's driver for the duration of the adapter call: go(), await(), sleep() ... made by the
+     * foreign fiber then run on, and are driven in place by, that nested driver. Limitation: the outer loop is
+     * blocked meanwhile (it is, anyway: the foreign fiber is running on top of it), and a task started this way is
+     * only advanced while some foreign fiber waits in place.
+     */
+    private function onDriver(\Closure $f): mixed
+    {
+        if ($this->canSuspend()) {
+            return $f();
+        }
+        $current = EventLoop::getDriver();
+        if (!$current->isRunning()) {
+            return $f();
+        }
+        $this->nested ??= new \WeakMap();
+        $nested = $this->nested[$current] ??= (new DriverFactory())->create();
+        $prop = new \ReflectionProperty(EventLoop::class, 'driver');
+        $prop->setValue(null, $nested);
+        try {
+            return $f();
+        } finally {
+            $prop->setValue(null, $current);
+        }
     }
 
     /**
@@ -133,13 +191,14 @@ final class Adapter implements \async\Adapter
         $suspend = $this->canSuspend();
         $scope = \Scope::getCurrent();
         $suspension = $suspend ? EventLoop::getSuspension() : null;
+        $driver = EventLoop::getDriver();
         $done = false;
         $suspended = false;
         $result = null;
         $cancel = null;
         $timer = null;
 
-        $settle = static function (bool $ok, mixed $value) use (&$done, &$suspended, &$result, &$cancel, &$timer, $suspension): void {
+        $settle = static function (bool $ok, mixed $value) use (&$done, &$suspended, &$result, &$cancel, &$timer, $suspension, $driver): void {
             if ($done) {
                 return;
             }
@@ -154,7 +213,7 @@ final class Adapter implements \async\Adapter
             if ($suspension !== null) {
                 $suspended && $suspension->resume();
             } else {
-                EventLoop::stop(); // let the in-place driver loop return
+                $driver->stop(); // let the in-place driver loop return
             }
         };
         $inScope = static fn(\Closure $cb): \Closure => static fn(...$a) => $scope->run($cb, ...$a);
