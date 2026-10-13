@@ -72,6 +72,18 @@ await any outer-loop future, including a raw `Amp\async()` one.
   in place from a foreign fiber; a public re-entrant "run until" in Revolt would remove them) and the `Revolt\EventLoop\Internal\` frame prefix in the backtrace check. A public
   "run the loop from this fiber" in Revolt would remove both.
 
+## Scope state
+
+`$_GET`, `$_POST`, `$_COOKIE` and `$_FILES` are per `\Scope` (see `fiber-interop/scope`). The loop must call `fiber_interop\scope\activate()` whenever it hands control to user code. Revolt has no hook for that, so the adapter's constructor installs a decorating driver (`EventLoop::setDriver()`, once; skipped if a scope-activating decorator, this one or another adapter's, is already installed, or if the loop is already running). It wraps every callback registered through `defer/delay/repeat/onReadable/onWritable/onSignal/queue` as `activate(); $cb(...)`, makes `Suspension::suspend()` call `activate()` when it returns, and calls `activate()` when `run()` returns. Amp's `async()`, `Future::await()` and `delay()` all go through `EventLoop`, so they are covered. `activate()` is one comparison unless the scope really changed. The in-place path (a foreign fiber driving the loop) calls it when its wait ends.
+
+Probes (`php probes/<name>.php`, exit 0 and print `ok`):
+
+- `scope-api.php` passes: two scopes interleave through `async\sleep()`, each keeps its own `$_GET`, the root value is back after `run()`.
+- `scope-loop.php` passes: the same with `Amp\async` + `Amp\delay` only. Amp's `async()` knows nothing about scopes, so the task enters its own scope with `$scope->run()`; the driver hooks keep it active across `delay()`. Both of these fail with the decorator removed.
+- `scope-raw-fiber.php` passes, but not because of this adapter: a plain `new Fiber` has no scope of its own and sees the creator's through the polyfill's "most recently current" fallback.
+
+Caveats: callbacks registered before the adapter was constructed are not wrapped; a task body started with plain `Amp\async()` runs in whatever scope is current in the loop, not the scope that called `async()`; only `go()` captures the creator's scope.
+
 ## Limitations
 
 - `go()`'s awaitable is an `Amp\Future`, which has no `then()`: other adapters (Revolt, ReactPHP) can only await it if

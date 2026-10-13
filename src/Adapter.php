@@ -24,6 +24,16 @@ use Revolt\EventLoop\Internal\DriverSuspension;
  */
 final class Adapter implements \async\Adapter
 {
+    public function __construct()
+    {
+        // Per-scope superglobals: make Revolt activate the current \Scope whenever it hands control to user code.
+        // Idempotent; skipped if a decorator is installed already (also another adapter's) or the loop is running.
+        $driver = EventLoop::getDriver();
+        if (!ActivatingDriver::isInstalled($driver) && !$driver->isRunning()) {
+            EventLoop::setDriver(new ActivatingDriver($driver));
+        }
+    }
+
     public function go(\Closure $f): object
     {
         // The api has already wrapped $f so it runs in the scope captured at go().
@@ -202,6 +212,7 @@ final class Adapter implements \async\Adapter
             }
         }
 
+        ActivatingDriver::activate(); // the in-place path returns without a decorated suspend()
         [$ok, $value] = $result;
         if (!$ok) {
             throw $value;
@@ -219,7 +230,7 @@ final class Adapter implements \async\Adapter
      */
     private function driveInPlace(bool &$done, bool &$nested): void
     {
-        $driver = EventLoop::getDriver();
+        $driver = ActivatingDriver::unwrap(EventLoop::getDriver());
         $ref = new \ReflectionClass(AbstractDriver::class);
         if ($ref->getProperty('fiber')->getValue($driver)->isRunning()) {
             $nested = true;
@@ -238,7 +249,10 @@ final class Adapter implements \async\Adapter
             }
             return;
         }
-        $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue(EventLoop::getSuspension());
+        $suspension = EventLoop::getSuspension();
+        $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue(
+            \method_exists($suspension, 'getInner') ? $suspension->getInner() : $suspension,
+        );
         while (!$done) {
             $interrupt = $run();
             if ($interrupt !== null) {
