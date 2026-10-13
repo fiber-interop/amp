@@ -7,6 +7,7 @@ namespace FiberInterop\Amp;
 use Revolt\EventLoop;
 use Revolt\EventLoop\CallbackType;
 use Revolt\EventLoop\Driver;
+use Revolt\EventLoop\Internal\DriverSuspension;
 use Revolt\EventLoop\Suspension;
 
 /**
@@ -68,25 +69,38 @@ final class ActivatingDriver implements Driver, ScopeActivatingDriver
         return $this->inner;
     }
 
-    /** Set by the adapter while stream waits are pending: wakes waiters of closed streams before the loop polls. */
-    public static ?\Closure $sweep = null;
+    /**
+     * Set by the adapter while stream waits are pending. Called only when stream_select() met a closed
+     * resource (TypeError/ValueError out of the loop): removes the dead watchers and wakes their waiters.
+     * Returns whether the failure was that one, so the loop can be resumed.
+     */
+    public static ?\Closure $recover = null;
+
+    public static function recovered(\Throwable $e): bool
+    {
+        return self::$recover !== null && (self::$recover)($e);
+    }
 
     private static function wrap(\Closure $closure): \Closure
     {
         // A callback runs in the Scope that was current when it was registered (Scope::run() activates it).
         $scope = \Scope::getCurrent();
-        return static function (mixed ...$args) use ($scope, $closure) {
-            try {
-                return $scope->run($closure, ...$args);
-            } finally {
-                self::$sweep !== null && (self::$sweep)();
-            }
-        };
+        return static fn(mixed ...$args) => $scope->run($closure, ...$args);
     }
 
     public function run(): void
     {
-        $this->inner->run();
+        while (true) {
+            try {
+                $this->inner->run();
+                break;
+            } catch (\TypeError | \ValueError $e) {
+                // stream_select() met a stream closed in the same tick: sweep, then run the loop again.
+                if (!self::recovered($e)) {
+                    throw $e;
+                }
+            }
+        }
         self::activate();
     }
 
@@ -113,9 +127,19 @@ final class ActivatingDriver implements Driver, ScopeActivatingDriver
 
             public function suspend(): mixed
             {
-                ActivatingDriver::$sweep !== null && (ActivatingDriver::$sweep)();
                 try {
-                    return $this->inner->suspend();
+                    while (true) {
+                        try {
+                            return $this->inner->suspend();
+                        } catch (\TypeError | \ValueError $e) {
+                            if (!ActivatingDriver::recovered($e) || !($this->inner instanceof DriverSuspension)) {
+                                throw $e;
+                            }
+                            // {main}'s suspension was left pending by the failed run; let it suspend again.
+                            $pending = new \ReflectionProperty(DriverSuspension::class, 'pending');
+                            $pending->getValue($this->inner) && $pending->setValue($this->inner, false);
+                        }
+                    }
                 } finally {
                     ActivatingDriver::activate();
                 }
