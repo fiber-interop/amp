@@ -68,11 +68,20 @@ final class ActivatingDriver implements Driver, ScopeActivatingDriver
         return $this->inner;
     }
 
+    /** Set by the adapter while stream waits are pending: wakes waiters of closed streams before the loop polls. */
+    public static ?\Closure $sweep = null;
+
     private static function wrap(\Closure $closure): \Closure
     {
         // A callback runs in the Scope that was current when it was registered (Scope::run() activates it).
         $scope = \Scope::getCurrent();
-        return static fn(mixed ...$args) => $scope->run($closure, ...$args);
+        return static function (mixed ...$args) use ($scope, $closure) {
+            try {
+                return $scope->run($closure, ...$args);
+            } finally {
+                self::$sweep !== null && (self::$sweep)();
+            }
+        };
     }
 
     public function run(): void
@@ -104,6 +113,7 @@ final class ActivatingDriver implements Driver, ScopeActivatingDriver
 
             public function suspend(): mixed
             {
+                ActivatingDriver::$sweep !== null && (ActivatingDriver::$sweep)();
                 try {
                     return $this->inner->suspend();
                 } finally {

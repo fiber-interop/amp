@@ -123,12 +123,46 @@ final class Adapter implements \async\Adapter
         $this->doWaitStream($method, $resource, $timeout);
     }
 
+    /** @var array<int, array{resource: mixed, settle: \Closure}> pending stream waits */
+    private array $streamWaits = [];
+    private int $streamSeq = 0;
+    private ?string $sweeper = null;
+
     private function doWaitStream(string $method, mixed $resource, float $timeout): void
     {
-        $this->wait(static function (\Closure $settle) use ($method, $resource) {
+        $this->wait(function (\Closure $settle) use ($method, $resource) {
             $id = EventLoop::$method($resource, static fn() => $settle(true, null));
-            return static fn() => EventLoop::cancel($id);
+            $key = $this->streamSeq++;
+            $this->streamWaits[$key] = ['resource' => $resource, 'settle' => $settle];
+            // A local fclose() raises no event: while stream waits are pending, re-check every ~10 ms.
+            if ($this->sweeper === null) {
+                $this->sweeper = EventLoop::repeat(0.01, $this->sweepClosed(...));
+                EventLoop::unreference($this->sweeper);
+                ActivatingDriver::$sweep = $this->sweepClosed(...);
+            }
+            return function () use ($id, $key): void {
+                unset($this->streamWaits[$key]);
+                try {
+                    EventLoop::cancel($id);
+                } catch (\Throwable) {
+                }
+                if ($this->streamWaits === [] && $this->sweeper !== null) {
+                    EventLoop::cancel($this->sweeper);
+                    $this->sweeper = null;
+                    ActivatingDriver::$sweep = null;
+                }
+            };
         }, $timeout);
+    }
+
+    /** Wake the waiters of resources that were closed or destroyed; their waits return normally. */
+    private function sweepClosed(): void
+    {
+        foreach ($this->streamWaits as $wait) {
+            if (!\is_resource($wait['resource'])) {
+                ($wait['settle'])(true, null); // cancels the watcher (guarded) and resumes
+            }
+        }
     }
 
     /**
@@ -235,6 +269,10 @@ final class Adapter implements \async\Adapter
             $tick = new \ReflectionMethod($driver, 'tick');
             $ref->getMethod('createCallbackFiber')->invoke($driver);
             while (!$done) {
+                $this->sweepClosed();
+                if ($done) {
+                    return;
+                }
                 $ref->getMethod('invokeCallbacks')->invoke($driver);
                 if ($done) {
                     return;
@@ -251,6 +289,10 @@ final class Adapter implements \async\Adapter
             \method_exists($suspension, 'getInner') ? $suspension->getInner() : $suspension,
         );
         while (!$done) {
+            $this->sweepClosed();
+            if ($done) {
+                break;
+            }
             $interrupt = $run();
             if ($interrupt !== null) {
                 $interrupt(); // an uncaught callback exception surfaces here, as with EventLoop::run()

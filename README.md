@@ -84,6 +84,15 @@ Probes (`php probes/<name>.php`, exit 0 and print `ok`):
 
 Caveats: callbacks registered before the adapter was constructed are not wrapped; 
 
+## Semantics: closing a stream
+
+`fclose()` (or destroying the resource) while fibers wait in `readable()`/`writable()` wakes them within ~10 ms and
+the waits return normally; the next operation on the closed resource fails. Mechanism: while any stream wait is
+pending, an unreferenced `EventLoop::repeat()` (10 ms) runs `is_resource()` on each waited stream; for a gone one
+it cancels the watcher (errors ignored) and resumes its waiters. The same sweep also runs after every callback
+(`Amp\async()` bodies included) and before every suspend, so a stream closed by the loop's own code is handled before
+the loop polls it (`stream_select` must never see a closed resource). No timer or hook exists when no stream wait is pending.
+
 ## Limitations
 
 - `go()`'s awaitable is an `Amp\Future`, which has no `then()`: other adapters (Revolt, ReactPHP) can only await it if
