@@ -51,11 +51,11 @@ suspends it: it observes the future with `map()`/`catch()` and drives an event l
 the wait is done. Which case applies is decided by `debug_backtrace()` (is the first of "Revolt driver frame" /
 "Fiber::start/resume" below us the driver?).
 
-A foreign fiber started from inside a task (the usual case: inside `run()`) cannot drive the running Revolt loop: the
-loop's own fiber is on the call stack and is not suspended, so resuming it is a `FiberError`. For that case the
-adapter creates a private nested Revolt driver and swaps it in (reflection on `EventLoop::$driver`) for the duration of
-each adapter call made by the foreign fiber, so `go()`, `sleep()`, `await()`, a nested `run()` ... from that fiber run on
-and are driven by the nested driver. The outer loop is blocked meanwhile, which it is anyway.
+A foreign fiber started from inside a task (the usual case: inside `run()`) cannot resume the running Revolt loop: the
+loop's own fiber and the current callback fiber are ancestors on the stack. For that case the adapter runs the same
+driver's `tick()` and `invokeCallbacks()` by hand from the foreign fiber (reflection on `AbstractDriver`, on a fresh
+callback fiber), exactly as `fiber-interop/revolt` does. Other tasks keep running meanwhile, and the foreign fiber can
+await any outer-loop future, including a raw `Amp\async()` one.
 
 ## What AMPHP would own
 
@@ -68,18 +68,14 @@ and are driven by the nested driver. The outer loop is blocked meanwhile, which 
   `fiber-interop/contracts` split). Until then the adapter throws `async\Timeout` (previous: the `Amp\CancelledException`)
   when its own timeout fires, and `FiberInterop\Amp\Cancelled` (previous: the Amp exception) when the awaited future itself
   failed with an `Amp\CancelledException`, including its own `TimeoutCancellation`. Every other exception is rethrown unchanged.
-- The only Revolt internals used: `Revolt\EventLoop\Internal\DriverSuspension::$run` and `EventLoop::$driver` (reflection, to drive a loop
-  in place from a foreign fiber) and the `Revolt\EventLoop\Internal\` frame prefix in the backtrace check. A public
+- The only Revolt internals used: `Revolt\EventLoop\Internal\DriverSuspension::$run` and `AbstractDriver` internals `tick()`, `invokeCallbacks()`, `createCallbackFiber()` (reflection, to drive the loop
+  in place from a foreign fiber; a public re-entrant "run until" in Revolt would remove them) and the `Revolt\EventLoop\Internal\` frame prefix in the backtrace check. A public
   "run the loop from this fiber" in Revolt would remove both.
 
 ## Limitations
 
 - `go()`'s awaitable is an `Amp\Future`, which has no `then()`: other adapters (Revolt, ReactPHP) can only await it if
   their `canAwait()` knows `Amp\Future` (the fiber-interop/revolt adapter does).
-- A foreign fiber started inside a running loop waits on a private nested driver (above): it can await tasks it started
-  through the api, but not a raw `Amp\async()` future that belongs to the outer loop (nothing would drive it); that
-  throws a `LogicException` ("Deadlock"). A task started on the nested driver only advances while some foreign fiber
-  waits in place.
 - `fiber-interop/revolt` and this package both drive Revolt; install only one adapter (or call `async\setup()`).
 - Nothing here cancels a running task; Amp's `Cancellation` objects stay the tool for that, inside the task.
 

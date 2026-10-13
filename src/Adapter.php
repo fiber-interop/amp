@@ -11,8 +11,7 @@ use Amp\TimeoutException as AmpTimeout;
 use async\RejectedException;
 use async\Timeout;
 use Revolt\EventLoop;
-use Revolt\EventLoop\Driver;
-use Revolt\EventLoop\DriverFactory;
+use Revolt\EventLoop\Internal\AbstractDriver;
 use Revolt\EventLoop\Internal\DriverSuspension;
 
 /**
@@ -28,14 +27,14 @@ final class Adapter implements \async\Adapter
     public function go(\Closure $f): object
     {
         // The api has already wrapped $f so it runs in the scope captured at go().
-        return $this->onDriver(static fn() => \Amp\async($f));
+        return \Amp\async($f);
     }
 
     public function service(\Closure $f): object
     {
         // A plain Amp\async() task. The api's run() waits only for its own (non-service) tasks, so a sleeping service
         // does not hold run() open and no unreference() of its watchers is needed (example 20).
-        return $this->onDriver(static fn() => \Amp\async($f));
+        return \Amp\async($f);
     }
 
     public function canAwait(object $o): bool
@@ -45,7 +44,7 @@ final class Adapter implements \async\Adapter
 
     public function await(object $o, float $timeout): mixed
     {
-        return $this->onDriver(fn() => $this->doAwait($o, $timeout));
+        return $this->doAwait($o, $timeout);
     }
 
     private function doAwait(object $o, float $timeout): mixed
@@ -87,7 +86,7 @@ final class Adapter implements \async\Adapter
 
     public function sleep(float $seconds): void
     {
-        $this->onDriver(fn() => $this->doSleep($seconds));
+        $this->doSleep($seconds);
     }
 
     private function doSleep(float $seconds): void
@@ -114,7 +113,7 @@ final class Adapter implements \async\Adapter
 
     private function waitStream(string $method, mixed $resource, float $timeout): void
     {
-        $this->onDriver(fn() => $this->doWaitStream($method, $resource, $timeout));
+        $this->doWaitStream($method, $resource, $timeout);
     }
 
     private function doWaitStream(string $method, mixed $resource, float $timeout): void
@@ -123,40 +122,6 @@ final class Adapter implements \async\Adapter
             $id = EventLoop::$method($resource, static fn() => $settle(true, null));
             return static fn() => EventLoop::cancel($id);
         }, $timeout);
-    }
-
-    /** @var \WeakMap<Driver, Driver> running driver => the private driver used for in-place waiting inside it */
-    private ?\WeakMap $nested = null;
-
-    /**
-     * Run $f against the driver that fits the calling context.
-     *
-     * A foreign fiber (one nobody's loop owns) that is started from inside a running Revolt loop cannot drive that
-     * loop in place: the loop's own fiber is on the call stack and is not suspended, so resuming it throws
-     * FiberError ("Cannot resume a fiber that is not suspended"). Such a fiber gets a private nested driver instead,
-     * swapped in as EventLoop's driver for the duration of the adapter call: go(), await(), sleep() ... made by the
-     * foreign fiber then run on, and are driven in place by, that nested driver. Limitation: the outer loop is
-     * blocked meanwhile (it is, anyway: the foreign fiber is running on top of it), and a task started this way is
-     * only advanced while some foreign fiber waits in place.
-     */
-    private function onDriver(\Closure $f): mixed
-    {
-        if ($this->canSuspend()) {
-            return $f();
-        }
-        $current = EventLoop::getDriver();
-        if (!$current->isRunning()) {
-            return $f();
-        }
-        $this->nested ??= new \WeakMap();
-        $nested = $this->nested[$current] ??= (new DriverFactory())->create();
-        $prop = new \ReflectionProperty(EventLoop::class, 'driver');
-        $prop->setValue(null, $nested);
-        try {
-            return $f();
-        } finally {
-            $prop->setValue(null, $current);
-        }
     }
 
     /**
@@ -193,12 +158,13 @@ final class Adapter implements \async\Adapter
         $suspension = $suspend ? EventLoop::getSuspension() : null;
         $driver = EventLoop::getDriver();
         $done = false;
+        $nested = false;
         $suspended = false;
         $result = null;
         $cancel = null;
         $timer = null;
 
-        $settle = static function (bool $ok, mixed $value) use (&$done, &$suspended, &$result, &$cancel, &$timer, $suspension, $driver): void {
+        $settle = static function (bool $ok, mixed $value) use (&$done, &$suspended, &$result, &$cancel, &$timer, $suspension, $driver, &$nested): void {
             if ($done) {
                 return;
             }
@@ -213,7 +179,7 @@ final class Adapter implements \async\Adapter
             if ($suspension !== null) {
                 $suspended && $suspension->resume();
             } else {
-                $driver->stop(); // let the in-place driver loop return
+                $nested || $driver->stop(); // let the in-place driver loop return
             }
         };
         $inScope = static fn(\Closure $cb): \Closure => static fn(...$a) => $scope->run($cb, ...$a);
@@ -232,7 +198,7 @@ final class Adapter implements \async\Adapter
                 $suspended = true;
                 $suspension->suspend();
             } else {
-                $this->driveInPlace($done);
+                $this->driveInPlace($done, $nested);
             }
         }
 
@@ -244,20 +210,37 @@ final class Adapter implements \async\Adapter
     }
 
     /**
-     * Run the loop from inside a fiber nobody owns. EventLoop::run() refuses to run inside a fiber, so
-     * resume the driver's loop fiber through the same closure DriverSuspension uses for {main}.
-     * (The only use of Revolt internals; a public "run in place" in Revolt would make it go away.)
+     * Wait in place from a fiber nobody owns (same approach as fiber-interop/revolt).
+     *  - Loop fiber not running: resume it through the closure DriverSuspension uses for {main}.
+     *  - Loop fiber running (the foreign fiber was started from a task, so the loop fiber and the current callback
+     *    fiber are ancestors on the stack and cannot be resumed): run the driver's own tick()/invokeCallbacks() by
+     *    hand from here, on a fresh callback fiber. Other tasks keep running meanwhile.
+     * Uses Revolt internals via reflection; a public re-entrant "run until" in Revolt would remove it.
      */
-    private function driveInPlace(bool &$done): void
+    private function driveInPlace(bool &$done, bool &$nested): void
     {
         $driver = EventLoop::getDriver();
+        $ref = new \ReflectionClass(AbstractDriver::class);
+        if ($ref->getProperty('fiber')->getValue($driver)->isRunning()) {
+            $nested = true;
+            $prop = static fn(string $n) => $ref->getProperty($n)->getValue($driver);
+            $tick = new \ReflectionMethod($driver, 'tick');
+            $ref->getMethod('createCallbackFiber')->invoke($driver);
+            while (!$done) {
+                $ref->getMethod('invokeCallbacks')->invoke($driver);
+                if ($done) {
+                    return;
+                }
+                if ($driver->getIdentifiers() === []) {
+                    throw new \LogicException('Deadlock: waiting with nothing scheduled');
+                }
+                $tick->invoke($driver, $prop('microtaskQueue')->isEmpty() && $prop('callbackQueue')->isEmpty());
+            }
+            return;
+        }
         $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue(EventLoop::getSuspension());
         while (!$done) {
-            try {
-                $interrupt = $run();
-            } catch (\FiberError $e) {
-                throw new \LogicException('fiber-interop/amp: cannot wait in place from a fiber nobody owns while the Revolt loop is running it', 0, $e);
-            }
+            $interrupt = $run();
             if ($interrupt !== null) {
                 $interrupt(); // an uncaught callback exception surfaces here, as with EventLoop::run()
             }

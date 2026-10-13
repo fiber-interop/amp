@@ -147,6 +147,17 @@ final class AdapterTest extends TestCase
         });
     }
 
+    public function testForeignFiberAwaitsRawAmpFutureOfOuterLoop(): void
+    {
+        run(function () {
+            $future = \Amp\async(function () { \Amp\delay(0.01); return 9; });
+            $fiber = new \Fiber(fn() => await($future));
+            $fiber->start();
+            $this->assertTrue($fiber->isTerminated());
+            $this->assertSame(9, $fiber->getReturn());
+        });
+    }
+
     public function testCanAwait(): void
     {
         $a = new Adapter();
