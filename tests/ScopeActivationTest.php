@@ -8,7 +8,7 @@ use FiberInterop\Amp\ActivatingDriver;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 
-use function async\run;
+use function fiber\run;
 
 /** The Revolt driver installed by the adapter keeps the active \Scope (and its $_GET) equal to the current one. */
 final class ScopeActivationTest extends TestCase

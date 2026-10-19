@@ -1,8 +1,8 @@
 <?php
-// Portable: two scopes interleave via async\sleep(); each must keep its own $_GET.
+// Portable: two scopes interleave via fiber\sleep(); each must keep its own $_GET.
 require __DIR__ . '/../vendor/autoload.php';
 
-use function async\{await_all, go, run, sleep};
+use function fiber\{await_all, go, run, sleep};
 
 $root = $_GET;
 $bad = new ArrayObject(); // an object: arrow fns capture by value

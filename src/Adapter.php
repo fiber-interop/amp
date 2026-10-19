@@ -8,8 +8,8 @@ use Amp\CancelledException as AmpCancelled;
 use Amp\Future;
 use Amp\TimeoutCancellation;
 use Amp\TimeoutException as AmpTimeout;
-use async\RejectedException;
-use async\Timeout;
+use fiber\RejectedException;
+use fiber\Timeout;
 use Revolt\EventLoop;
 use Revolt\EventLoop\Internal\AbstractDriver;
 use Revolt\EventLoop\Internal\DriverSuspension;
@@ -22,7 +22,7 @@ use Revolt\EventLoop\Internal\DriverSuspension;
  *  - {main} (only the outermost run()'s wait), a fiber created by Amp\async(), or a fiber running inside a Revolt callback: Amp / Revolt suspension.
  *  - any other fiber (one nobody's loop owns): the loop is driven in place, from inside that fiber.
  */
-final class Adapter implements \async\Adapter
+final class Adapter implements \fiber\Adapter
 {
     public function __construct()
     {
@@ -83,7 +83,7 @@ final class Adapter implements \async\Adapter
             return $future->await($cancellation);
         } catch (AmpCancelled $e) {
             // Our own TimeoutCancellation fired: the future is left running. (Until Amp's exceptions implement the
-            // async\ interfaces, translate; a CancelledException the future itself failed with is wrapped likewise.)
+            // fiber\ interfaces, translate; a CancelledException the future itself failed with is wrapped likewise.)
             if ($cancellation !== null && $cancellation->isRequested() && $e->getPrevious() instanceof AmpTimeout) {
                 throw new Timeout(\sprintf('Timed out after %.3fs', $timeout), 0, $e);
             }

@@ -1,12 +1,12 @@
 <?php
-// Runtime-specific: same scenario with Amp\async + Amp\delay only (async\run() just starts the loop).
+// Runtime-specific: same scenario with Amp\async + Amp\delay only (fiber\run() just starts the loop).
 require __DIR__ . '/../vendor/autoload.php';
 
 use function Amp\{async, delay};
 
 $root = $_GET;
 $bad = new ArrayObject(); // an object: arrow fns capture by value
-async\run(function () use ($bad) {
+fiber\run(function () use ($bad) {
     $task = function (string $name, float $delay) use ($bad) {
         // The scope is entered around Amp\async(); the driver runs the task's start callback in it and keeps
         // it active across Amp\delay().

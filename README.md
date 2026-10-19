@@ -1,18 +1,18 @@
 # fiber-interop/amp
 
-The native AMPHP v3 adapter for [`fiber-interop/api`](../api). Code written against `async\go()`, `async\await()`,
-`async\sleep()`, `async\readable()` and `async\writable()` runs on Amp's own primitives, and the awaitable `go()`
+The native AMPHP v3 adapter for [`fiber-interop/api`](../api). Code written against `fiber\go()`, `fiber\await()`,
+`fiber\sleep()`, `fiber\readable()` and `fiber\writable()` runs on Amp's own primitives, and the awaitable `go()`
 returns is a real `Amp\Future`.
 
 ```
 composer require fiber-interop/amp
 ```
 
-Installing the package registers the adapter (Composer `files` autoload calls `async\register(...)`); if it is the only
+Installing the package registers the adapter (Composer `files` autoload calls `fiber\register(...)`); if it is the only
 adapter installed, nothing else is needed.
 
 ```php
-use function async\{run, go, await, sleep};
+use function fiber\{run, go, await, sleep};
 
 // run() is the only entry point: structured, it returns when the tasks started inside it are done
 echo run(function () {
@@ -61,11 +61,11 @@ await any outer-loop future, including a raw `Amp\async()` one.
 
 - `src/Adapter.php` (about 200 lines) and `src/register.php`.
 - Proposed one-line changes to `amphp/amp` so that the translation disappears:
-  - `Amp\TimeoutException implements async\TimeoutException`
-  - `Amp\CancelledException implements async\CancelledException`
+  - `Amp\TimeoutException implements fiber\TimeoutException`
+  - `Amp\CancelledException implements fiber\CancelledException`
 
   (both are marker interfaces in `fiber-interop/api`; the dependency can be a `suggest` or a tiny
-  `fiber-interop/contracts` split). Until then the adapter throws `async\Timeout` (previous: the `Amp\CancelledException`)
+  `fiber-interop/contracts` split). Until then the adapter throws `fiber\Timeout` (previous: the `Amp\CancelledException`)
   when its own timeout fires, and `FiberInterop\Amp\Cancelled` (previous: the Amp exception) when the awaited future itself
   failed with an `Amp\CancelledException`, including its own `TimeoutCancellation`. Every other exception is rethrown unchanged.
 - The only Revolt internals used: `Revolt\EventLoop\Internal\DriverSuspension::$run` and `AbstractDriver` internals `tick()`, `invokeCallbacks()`, `createCallbackFiber()` (reflection, to drive the loop
@@ -78,7 +78,7 @@ await any outer-loop future, including a raw `Amp\async()` one.
 
 Probes (`php probes/<name>.php`, exit 0 and print `ok`):
 
-- `scope-api.php` passes: two scopes interleave through `async\sleep()`, each keeps its own `$_GET`, the root value is back after `run()`.
+- `scope-api.php` passes: two scopes interleave through `fiber\sleep()`, each keeps its own `$_GET`, the root value is back after `run()`.
 - `scope-loop.php` passes: the same with `Amp\async` + `Amp\delay` only. The scope is entered around `Amp\async()`; the driver runs the task in it and keeps it active across `delay()`. Both of these fail with the decorator removed.
 - `scope-raw-fiber.php` passes, but not because of this adapter: a plain `new Fiber` has no scope of its own and sees the creator's through the polyfill's "most recently current" fallback.
 
@@ -104,7 +104,7 @@ No work is done per callback, per suspend or per loop iteration.
 
 - `go()`'s awaitable is an `Amp\Future`, which has no `then()`: other adapters (Revolt, ReactPHP) can only await it if
   their `canAwait()` knows `Amp\Future` (the fiber-interop/revolt adapter does).
-- `fiber-interop/revolt` and this package both drive Revolt; install only one adapter (or call `async\setup()`).
+- `fiber-interop/revolt` and this package both drive Revolt; install only one adapter (or call `fiber\setup()`).
 - Nothing here cancels a running task; Amp's `Cancellation` objects stay the tool for that, inside the task.
 
 ## Tests

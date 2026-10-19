@@ -2,7 +2,7 @@
 // Portable: a plain Fiber with bare Fiber::suspend() sees its creator's $_GET before and after.
 require __DIR__ . '/../vendor/autoload.php';
 
-use function async\run;
+use function fiber\run;
 
 $bad = [];
 $check = function (string $label, array $expect) use (&$bad) {
